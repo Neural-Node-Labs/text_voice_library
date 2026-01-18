@@ -1009,3 +1009,307 @@ from voice_text_lib import VoiceTextException
 
 def safe_transcribe(audio_file, max_retries=3):
     """
+
+<function_calls>
+<invoke name="artifacts">
+<parameter name="command">update</parameter>
+<parameter name="id">usage_guide</parameter>
+<parameter name="old_str">def safe_transcribe(audio_file, max_retries=3):
+    """</parameter>
+<parameter name="new_str">def safe_transcribe(audio_file, max_retries=3):
+    """Transcribe with error handling and retries"""
+    
+    for attempt in range(max_retries):
+        try:
+            audio = loader.load(audio_file)
+            result = stt.recognize(audio)
+            return result
+        
+        except FileNotFoundError:
+            print(f"❌ File not found: {audio_file}")
+            return None
+        
+        except VoiceTextException as e:
+            if attempt < max_retries - 1:
+                print(f"⚠️  Attempt {attempt + 1} failed, retrying...")
+                continue
+            else:
+                print(f"❌ Failed after {max_retries} attempts: {e}")
+                return None
+        
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+            return None
+
+# Usage
+result = safe_transcribe("audio.wav")
+if result:
+    print(f"Success: {result.text}")
+```
+
+### 3. Performance Optimization
+
+```python
+# Cache frequently used profiles
+class VoiceProfileCache:
+    def __init__(self, engine):
+        self.engine = engine
+        self.cache = {}
+    
+    def get_profile(self, profile_name):
+        if profile_name not in self.cache:
+            if profile_name in self.engine.get_preset_list():
+                self.cache[profile_name] = self.engine.profile_manager.load_preset(profile_name)
+            else:
+                self.cache[profile_name] = self.engine.load_saved_profile(profile_name)
+        
+        return self.cache[profile_name]
+
+# Usage
+cache = VoiceProfileCache(engine)
+voice1 = cache.get_profile("professional_male")  # Loaded from disk
+voice2 = cache.get_profile("professional_male")  # Retrieved from cache
+```
+
+### 4. Logging Best Practices
+
+```python
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+def process_with_logging(audio_file):
+    logger.info(f"Starting processing: {audio_file}")
+    
+    try:
+        audio = loader.load(audio_file)
+        logger.info(f"Loaded audio: {audio.duration:.2f}s")
+        
+        result = stt.recognize(audio)
+        logger.info(f"Transcribed: {len(result.text)} characters")
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"Processing failed: {e}", exc_info=True)
+        raise
+
+# Check trace logs
+def analyze_trace_logs():
+    """Analyze LLM interaction logs"""
+    import json
+    
+    with open('llm_interaction.log', 'r') as f:
+        for line in f:
+            trace = json.loads(line)
+            print(f"{trace['component']} - {trace['event']}: {trace['duration_ms']:.2f}ms")
+```
+
+---
+
+## 🔧 Error Handling
+
+### Common Error Scenarios
+
+```python
+# 1. File not found
+try:
+    audio = loader.load("nonexistent.wav")
+except VoiceTextException as e:
+    print(f"File error: {e}")
+
+# 2. Invalid format
+try:
+    audio = loader.load("image.jpg")
+except VoiceTextException as e:
+    print(f"Format error: {e}")
+
+# 3. Invalid voice parameters
+try:
+    voice = engine.create_custom_voice(
+        name="Invalid",
+        pitch=50.0  # Out of range
+    )
+except VoiceTextException as e:
+    print(f"Validation error: {e}")
+
+# 4. API errors
+try:
+    result = stt.recognize(audio, engine='google')
+except Exception as e:
+    print(f"API error: {e}")
+
+# 5. Permission errors
+try:
+    writer.write(audio, "/root/protected.wav")
+except PermissionError as e:
+    print(f"Permission denied: {e}")
+```
+
+### Comprehensive Error Handler
+
+```python
+def robust_voice_pipeline(
+    input_file,
+    output_file,
+    voice_profile_name,
+    fallback_engine='pyttsx3'
+):
+    """Production-ready pipeline with comprehensive error handling"""
+    
+    try:
+        # Load audio
+        try:
+            audio = loader.load(input_file)
+        except FileNotFoundError:
+            logger.error(f"Input file not found: {input_file}")
+            return {"status": "error", "message": "File not found"}
+        except VoiceTextException as e:
+            logger.error(f"Invalid audio file: {e}")
+            return {"status": "error", "message": str(e)}
+        
+        # Transcribe
+        try:
+            text = stt.recognize(audio, engine='google')
+        except Exception as e:
+            logger.warning(f"Primary STT failed, trying {fallback_engine}: {e}")
+            try:
+                text = stt.recognize(audio, engine=fallback_engine)
+            except Exception as e2:
+                logger.error(f"All STT engines failed: {e2}")
+                return {"status": "error", "message": "Transcription failed"}
+        
+        # Load voice profile
+        try:
+            if voice_profile_name in engine.get_preset_list():
+                voice = engine.profile_manager.load_preset(voice_profile_name)
+            else:
+                voice = engine.load_saved_profile(voice_profile_name)
+        except VoiceTextException as e:
+            logger.warning(f"Profile load failed, using default: {e}")
+            voice = engine.profile_manager.load_preset("professional_male")
+        
+        # Synthesize
+        try:
+            audio_out = tts.synthesize(text, engine='gtts')
+        except Exception as e:
+            logger.warning(f"Primary TTS failed, trying {fallback_engine}: {e}")
+            try:
+                audio_out = tts.synthesize(text, engine=fallback_engine)
+            except Exception as e2:
+                logger.error(f"All TTS engines failed: {e2}")
+                return {"status": "error", "message": "Synthesis failed"}
+        
+        # Apply profile
+        try:
+            final = engine.apply_voice_profile(audio_out, profile=voice)
+        except Exception as e:
+            logger.warning(f"Voice profile application failed, using original: {e}")
+            final = audio_out
+        
+        # Save
+        try:
+            result = writer.write(final, output_file, overwrite=True)
+            logger.info(f"Success: {result['file_path']}")
+            return {"status": "success", "file": result['file_path']}
+        except Exception as e:
+            logger.error(f"Failed to save output: {e}")
+            return {"status": "error", "message": "Save failed"}
+    
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+```
+
+---
+
+## ⚡ Performance Optimization
+
+### Async Processing
+
+```python
+import asyncio
+
+async def process_audio_async(audio_file):
+    """Async audio processing"""
+    loop = asyncio.get_event_loop()
+    
+    # Run blocking operations in thread pool
+    audio = await loop.run_in_executor(None, loader.load, audio_file)
+    result = await loop.run_in_executor(None, stt.recognize, audio)
+    
+    return result
+
+# Process multiple files concurrently
+async def batch_process_async(audio_files):
+    tasks = [process_audio_async(f) for f in audio_files]
+    results = await asyncio.gather(*tasks)
+    return results
+
+# Usage
+files = ["file1.wav", "file2.wav", "file3.wav"]
+results = asyncio.run(batch_process_async(files))
+```
+
+### Caching Strategy
+
+```python
+from functools import lru_cache
+import hashlib
+
+class CachedVoiceEngine:
+    def __init__(self):
+        self.engine = VoiceCustomizationEngine()
+        self.audio_cache = {}
+    
+    def get_cache_key(self, text, profile_id, emotion):
+        """Generate cache key"""
+        data = f"{text}:{profile_id}:{emotion}"
+        return hashlib.md5(data.encode()).hexdigest()
+    
+    def synthesize_cached(self, text, profile, emotion="neutral"):
+        """Synthesize with caching"""
+        cache_key = self.get_cache_key(text, profile.profile_id, emotion)
+        
+        if cache_key in self.audio_cache:
+            print("✅ Cache hit")
+            return self.audio_cache[cache_key]
+        
+        print("⚠️  Cache miss, synthesizing...")
+        audio = tts.synthesize(text)
+        final = self.engine.apply_voice_profile(
+            audio,
+            profile=profile,
+            emotion=emotion
+        )
+        
+        self.audio_cache[cache_key] = final
+        return final
+
+# Usage
+cached_engine = CachedVoiceEngine()
+voice = engine.create_custom_voice(name="Test")
+
+audio1 = cached_engine.synthesize_cached("Hello", voice)  # Cache miss
+audio2 = cached_engine.synthesize_cached("Hello", voice)  # Cache hit
+```
+
+---
+
+For complete API reference, see documentation files.
+For installation help, see [SETUP.md](SETUP.md).
+For project overview, see [README.md](README.md).
+
+---
+
+**Happy coding! 🎉**</parameter>
