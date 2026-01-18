@@ -812,4 +812,377 @@ class VoiceProfileStorageComponent:
     def __init__(self, storage_path: str = "./voice_profiles"):
         self.logger = logger
         self.storage_path = Path(storage_path)
-        self.storage_path
+        self.storage_path.mkdir(exist_ok=True, parents=True)
+    
+    def save_profile(self, profile: VoiceProfile) -> Dict[str, Any]:
+        """
+        Save voice profile to storage
+        
+        IN Schema:
+            profile: VoiceProfile - Profile to save
+        
+        OUT Schema:
+            {success: bool, profile_id: str, file_path: str}
+        """
+        trace_start = datetime.utcnow()
+        self.logger.trace(self.COMPONENT_NAME, "STORAGE_SAVE", {
+            "profile_id": profile.profile_id,
+            "name": profile.name
+        })
+        
+        try:
+            # Validate profile
+            validation = profile.validate()
+            if not validation["valid"]:
+                raise VoiceTextException(f"Invalid profile: {validation['errors']}")
+            
+            # Create filename
+            safe_name = "".join(c for c in profile.name if c.isalnum() or c in (' ', '-', '_'))
+            filename = f"{profile.profile_id}_{safe_name}.json"
+            file_path = self.storage_path / filename
+            
+            # Save to JSON
+            with open(file_path, 'w') as f:
+                json.dump(profile.to_dict(), f, indent=2)
+            
+            result = {
+                "success": True,
+                "profile_id": profile.profile_id,
+                "file_path": str(file_path)
+            }
+            
+            duration_ms = (datetime.utcnow() - trace_start).total_seconds() * 1000
+            self.logger.trace(self.COMPONENT_NAME, "STORAGE_SAVE_SUCCESS", result, duration_ms)
+            
+            return result
+            
+        except Exception as e:
+            self._handle_error("ERR_STORAGE_001", e, {
+                "profile_id": profile.profile_id
+            }, "RETRY")
+            raise
+    
+    def load_profile(self, profile_id: str) -> VoiceProfile:
+        """
+        Load voice profile from storage
+        
+        IN Schema:
+            profile_id: str - Profile ID to load
+        
+        OUT Schema:
+            VoiceProfile object
+        """
+        trace_start = datetime.utcnow()
+        self.logger.trace(self.COMPONENT_NAME, "STORAGE_LOAD", {"profile_id": profile_id})
+        
+        try:
+            # Find profile file
+            profile_files = list(self.storage_path.glob(f"{profile_id}_*.json"))
+            
+            if not profile_files:
+                raise VoiceTextException(f"Profile not found: {profile_id}")
+            
+            # Load from JSON
+            with open(profile_files[0], 'r') as f:
+                data = json.load(f)
+            
+            profile = VoiceProfile.from_dict(data)
+            
+            duration_ms = (datetime.utcnow() - trace_start).total_seconds() * 1000
+            self.logger.trace(self.COMPONENT_NAME, "STORAGE_LOAD_SUCCESS", {
+                "profile_id": profile_id,
+                "name": profile.name
+            }, duration_ms)
+            
+            return profile
+            
+        except Exception as e:
+            self._handle_error("ERR_STORAGE_002", e, {"profile_id": profile_id}, "ABORT")
+            raise
+    
+    def list_profiles(self) -> List[Dict[str, str]]:
+        """List all saved profiles"""
+        profiles = []
+        
+        for file_path in self.storage_path.glob("*.json"):
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                    profiles.append({
+                        "profile_id": data.get("profile_id"),
+                        "name": data.get("name"),
+                        "gender": data.get("gender"),
+                        "language": data.get("language")
+                    })
+            except Exception:
+                pass
+        
+        return profiles
+    
+    def delete_profile(self, profile_id: str) -> Dict[str, Any]:
+        """Delete profile from storage"""
+        try:
+            profile_files = list(self.storage_path.glob(f"{profile_id}_*.json"))
+            
+            if not profile_files:
+                raise VoiceTextException(f"Profile not found: {profile_id}")
+            
+            profile_files[0].unlink()
+            
+            return {"success": True, "profile_id": profile_id}
+            
+        except Exception as e:
+            self._handle_error("ERR_STORAGE_003", e, {"profile_id": profile_id}, "ABORT")
+            raise
+    
+    def _handle_error(self, error_code: str, error: Exception, context: Dict, recovery: str):
+        error_obj = ComponentError(
+            error_code=error_code,
+            component=self.COMPONENT_NAME,
+            message=str(error),
+            timestamp=datetime.utcnow().isoformat(),
+            stack_trace=traceback.format_exc(),
+            recovery_action=recovery,
+            context=context
+        )
+        self.logger.error(self.COMPONENT_NAME, error, context)
+
+# ============================================================================
+# HIGH-LEVEL API: VoiceCustomizationEngine
+# ============================================================================
+
+class VoiceCustomizationEngine:
+    """
+    High-level API combining all voice customization components
+    Provides simple interface for complex voice transformations
+    """
+    
+    def __init__(self, storage_path: str = "./voice_profiles"):
+        self.profile_manager = VoiceProfileComponent()
+        self.effects = AudioEffectsComponent()
+        self.transformer = VoiceTransformComponent()
+        self.emotion_engine = EmotionEngineComponent()
+        self.storage = VoiceProfileStorageComponent(storage_path)
+    
+    def create_custom_voice(self, name: str, base_preset: str = None, 
+                           **customizations) -> VoiceProfile:
+        """
+        Create custom voice profile with easy customization
+        
+        Args:
+            name: Profile name
+            base_preset: Optional preset to start from
+            **customizations: Voice parameters to customize
+        
+        Returns:
+            VoiceProfile object
+        
+        Example:
+            voice = engine.create_custom_voice(
+                name="My Custom Voice",
+                base_preset="professional_male",
+                pitch=-1.0,
+                speed=0.9,
+                emotion_default="confident"
+            )
+        """
+        if base_preset:
+            profile = self.profile_manager.load_preset(base_preset)
+            profile.name = name
+            profile.profile_id = str(uuid.uuid4())
+            
+            # Apply customizations
+            for key, value in customizations.items():
+                if hasattr(profile, key):
+                    setattr(profile, key, value)
+        else:
+            profile = self.profile_manager.create_profile(name, **customizations)
+        
+        # Save to storage
+        self.storage.save_profile(profile)
+        
+        return profile
+    
+    def apply_voice_profile(self, audio: AudioData, profile: VoiceProfile,
+                           emotion: Optional[str] = None,
+                           emotion_intensity: float = 1.0,
+                           effects: Optional[List[EffectConfig]] = None) -> AudioData:
+        """
+        Apply complete voice profile to audio
+        
+        Args:
+            audio: Input audio
+            profile: Voice profile to apply
+            emotion: Optional emotional tone
+            emotion_intensity: Emotion intensity (0.0-1.0)
+            effects: Optional audio effects to apply
+        
+        Returns:
+            Transformed AudioData
+        """
+        # Apply voice transformations
+        transform = VoiceTransform(
+            pitch_shift=profile.pitch,
+            formant_shift=1.0 + (profile.pitch / 12.0) * 0.15  # Approximate formant
+        )
+        
+        transformed_audio = self.transformer.transform_voice(audio, transform)
+        
+        # Apply emotion if specified
+        if emotion:
+            emotion_params = self.emotion_engine.apply_emotion(
+                emotion,
+                emotion_intensity,
+                profile
+            )
+            # Apply emotional prosody (would modify audio in real implementation)
+        
+        # Apply effects if specified
+        if effects:
+            transformed_audio = self.effects.apply_effects(transformed_audio, effects)
+        
+        return transformed_audio
+    
+    def get_preset_list(self) -> List[str]:
+        """Get list of available preset voice profiles"""
+        return self.profile_manager.list_presets()
+    
+    def get_saved_profiles(self) -> List[Dict[str, str]]:
+        """Get list of user-saved profiles"""
+        return self.storage.list_profiles()
+    
+    def load_saved_profile(self, profile_id: str) -> VoiceProfile:
+        """Load a saved custom profile"""
+        return self.storage.load_profile(profile_id)
+
+# ============================================================================
+# USAGE EXAMPLES
+# ============================================================================
+
+if __name__ == "__main__":
+    print("=" * 70)
+    print("  Enhanced Voice Profile & Sound Customization Demo")
+    print("=" * 70)
+    
+    # Initialize engine
+    engine = VoiceCustomizationEngine()
+    
+    # Example 1: Create voice profile from preset
+    print("\n[Example 1] Creating custom voice from preset...")
+    voice1 = engine.create_custom_voice(
+        name="My Professional Voice",
+        base_preset="professional_male",
+        pitch=-1.0,
+        speed=0.95,
+        emotion_default="confident"
+    )
+    print(f"✓ Created: {voice1.name}")
+    print(f"  Profile ID: {voice1.profile_id}")
+    print(f"  Pitch: {voice1.pitch}, Speed: {voice1.speed}")
+    
+    # Example 2: Create completely custom voice
+    print("\n[Example 2] Creating custom voice from scratch...")
+    voice2 = engine.create_custom_voice(
+        name="Friendly Robot",
+        gender=Gender.NEUTRAL.value,
+        pitch=0.0,
+        speed=1.1,
+        volume=1.0,
+        accent="robotic",
+        emotion_default=Emotion.HAPPY.value
+    )
+    print(f"✓ Created: {voice2.name}")
+    
+    # Example 3: Apply audio effects
+    print("\n[Example 3] Applying audio effects...")
+    effects_component = AudioEffectsComponent()
+    
+    reverb = effects_component.create_reverb(room_size=0.7, damping=0.5)
+    echo = effects_component.create_echo(delay_ms=300, feedback=0.4)
+    eq = effects_component.create_equalizer(bass=3, mid=0, treble=-2)
+    
+    mock_audio = AudioData(b"SAMPLE_AUDIO", "wav", 44100, 3.0)
+    processed = effects_component.apply_effects(mock_audio, [reverb, echo, eq])
+    print(f"✓ Applied {len([reverb, echo, eq])} effects")
+    print(f"  Original size: {len(mock_audio.audio_bytes)} bytes")
+    print(f"  Processed size: {len(processed.audio_bytes)} bytes")
+    
+    # Example 4: Voice transformation
+    print("\n[Example 4] Voice transformation presets...")
+    transformer = VoiceTransformComponent()
+    
+    transform_presets = {
+        "Male to Female": transformer.male_to_female(),
+        "Female to Male": transformer.female_to_male(),
+        "Robot Voice": transformer.robot_voice()
+    }
+    
+    for preset_name, transform in transform_presets.items():
+        result = transformer.transform_voice(mock_audio, transform)
+        print(f"✓ {preset_name}: Pitch {transform.pitch_shift:+.1f}, "
+              f"Formant {transform.formant_shift:.2f}")
+    
+    # Example 5: Emotion application
+    print("\n[Example 5] Applying emotional tones...")
+    emotion_engine = EmotionEngineComponent()
+    
+    emotions_to_test = [Emotion.HAPPY.value, Emotion.SAD.value, Emotion.ANGRY.value]
+    
+    for emotion in emotions_to_test:
+        mods = emotion_engine.apply_emotion(emotion, intensity=0.8, base_profile=voice1)
+        print(f"✓ {emotion.capitalize()}: "
+              f"Pitch {mods['pitch_shift']:+.1f}, "
+              f"Speed {mods['speed_multiplier']:.2f}x, "
+              f"Volume {mods['volume_multiplier']:.2f}x")
+    
+    # Example 6: List available presets
+    print("\n[Example 6] Available preset voices...")
+    presets = engine.get_preset_list()
+    print(f"Found {len(presets)} preset voices:")
+    for preset in presets:
+        print(f"  - {preset}")
+    
+    # Example 7: Load and modify saved profile
+    print("\n[Example 7] Saved profiles...")
+    saved = engine.get_saved_profiles()
+    print(f"Found {len(saved)} saved profiles:")
+    for profile_info in saved:
+        print(f"  - {profile_info['name']} ({profile_info['gender']}, {profile_info['language']})")
+    
+    # Example 8: Complete voice customization pipeline
+    print("\n[Example 8] Complete customization pipeline...")
+    
+    # Create custom voice
+    custom_voice = engine.create_custom_voice(
+        name="Energetic Presenter",
+        base_preset="friendly_assistant",
+        pitch=1.5,
+        speed=1.15,
+        emotion_default=Emotion.EXCITED.value
+    )
+    
+    # Prepare effects
+    effects_chain = [
+        effects_component.create_reverb(room_size=0.3, damping=0.6),
+        effects_component.create_equalizer(bass=2, mid=1, treble=0)
+    ]
+    
+    # Apply complete profile
+    final_audio = engine.apply_voice_profile(
+        audio=mock_audio,
+        profile=custom_voice,
+        emotion=Emotion.EXCITED.value,
+        emotion_intensity=0.7,
+        effects=effects_chain
+    )
+    
+    print(f"✓ Complete pipeline executed:")
+    print(f"  Voice: {custom_voice.name}")
+    print(f"  Emotion: {Emotion.EXCITED.value} (70% intensity)")
+    print(f"  Effects: {len(effects_chain)} applied")
+    print(f"  Output: {len(final_audio.audio_bytes)} bytes")
+    
+    print("\n" + "=" * 70)
+    print("Demo complete! Check voice_profiles/ for saved profiles.")
+    print("Check llm_interaction.log for detailed trace logs.")
+    print("=" * 70)
